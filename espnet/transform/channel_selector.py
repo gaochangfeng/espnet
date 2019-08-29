@@ -1,5 +1,5 @@
 import numpy
-——————————test
+
 
 class ChannelSelector(object):
     """Select 1ch from multi-channel signal """
