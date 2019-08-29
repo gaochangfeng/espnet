@@ -65,7 +65,7 @@ class EncoderLayer(nn.Module):
         core_out = self.layer(core_out, pos_emb, self.r_w_bias,
                               self.r_r_bias, dec_attn_mask=dec_attn_mask, mems=mems_i)
         core_out = self.drop(core_out)
-        new_mems = self._update_mems(hids, mems, qlen, meln)
+        new_mems = self._update_mems(hids, mems, mlen, qlen)
         return core_out, new_mems
 
     def _update_mems(self, hids, mems, qlen, mlen):
