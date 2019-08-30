@@ -67,6 +67,12 @@ class E2E(ASRInterface, torch.nn.Module):
         group.add_argument("--transformer-encoder-ext-len", type=int, default=0,
                            help='transformer encoder extra memory length,only used when transformer-encoder-type is '
                                 'memory')
+        group.add_argument("--transformer-encoder-future-len", type=int, default=0,
+                           help='future data of the encoder')
+        group.add_argument("--transformer-encoder-abs-embed", type=bool, default=False,
+                           help='whether the network use absolute embed')
+        group.add_argument("--transformer-encoder-rel-embed", type=bool, default=True,
+                           help='whether the network us reality embed')
         return parser
 
     @property
@@ -82,7 +88,9 @@ class E2E(ASRInterface, torch.nn.Module):
             time_len=args.transformer_encoder_chunk_len,
             mem_len=args.transformer_encoder_mem_len,
             ext_len=args.transformer_encoder_ext_len,
-            attention_type=args.transformer_encoder_type,
+            future_len=args.transformer_encoder_future_len,
+            abs_pos=args.transformer_encoder_abs_embed,
+            rel_pos=args.transformer_encoder_rel_embed,
             attention_dim=args.adim,
             attention_heads=args.aheads,
             linear_units=args.eunits,

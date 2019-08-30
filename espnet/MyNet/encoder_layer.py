@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from espnet.MyNet.repos_attention import RelPositionalEmbedding
 from espnet.MyNet.repos_attention import RelPartialLearnableDecoderLayer
+from espnet.nets.pytorch_backend.transformer.encoder_layer import EncoderLayer as AbsEncoderLayer
+from espnet.nets.pytorch_backend.transformer.attention import MultiHeadedAttention
 
 
 class EncoderLayer(nn.Module):
@@ -21,21 +23,28 @@ class EncoderLayer(nn.Module):
     """
 
     def __init__(self, n_head, d_model, d_head, pos_ff,
-                 dropout, ext_len, mem_len, dropatt, pre_lnorm, tgt_len=None):
+                 dropout, dropatt, pre_lnorm, tgt_len=None,
+                 ext_len=0, mem_len=0, future_len=0, rel_pos=True):
         super(EncoderLayer, self).__init__()
         self.mems = None
         self.n_head = n_head
         self.d_head = d_head
         self.d_model = d_model
         self.mem_len = mem_len
+        self.rel_pos = rel_pos
+        self.future_len = future_len
         self.tgt_len = tgt_len
         self.pos_emb = RelPositionalEmbedding(self.d_model)
         self.r_w_bias = nn.Parameter(torch.rand(size=[n_head, d_head]))
         self.r_r_bias = nn.Parameter(torch.rand(size=[n_head, d_head]))
-        self.layer = RelPartialLearnableDecoderLayer(n_head=n_head, d_model=d_model, d_head=d_head,
-                                                     dropout=dropout, pos_ff=pos_ff,
-                                                     tgt_len=tgt_len, ext_len=ext_len, mem_len=mem_len,
-                                                     dropatt=dropatt, pre_lnorm=pre_lnorm)
+        if rel_pos:
+            self.layer = RelPartialLearnableDecoderLayer(n_head=n_head, d_model=d_model, d_head=d_head,
+                                                         dropout=dropout, pos_ff=pos_ff,
+                                                         tgt_len=tgt_len, ext_len=ext_len, mem_len=mem_len,
+                                                         dropatt=dropatt, pre_lnorm=pre_lnorm)
+        else:
+            self.layer = AbsEncoderLayer(d_model, MultiHeadedAttention(n_head, d_model, dropatt),
+                                         pos_ff, dropout, pre_lnorm, concat_after=False)
         self.drop = nn.Dropout(dropout)
         self.ext_len = ext_len
 
@@ -58,15 +67,12 @@ class EncoderLayer(nn.Module):
         pos_emb = self.pos_emb(pos_seq)
         core_out = self.drop(word_emb)
         pos_emb = self.drop(pos_emb)
-
-        hids = core_out
-
         mems_i = None if mems is None else mems
         core_out = self.layer(core_out, pos_emb, self.r_w_bias,
                               self.r_r_bias, dec_attn_mask=dec_attn_mask, mems=mems_i)
         core_out = self.drop(core_out)
-        new_mems = self._update_mems(hids, mems, qlen, mlen)
-        return core_out, new_mems
+
+        return core_out
 
     def _update_mems(self, hids, mems, qlen, mlen):
         # does not deal with None
@@ -78,7 +84,7 @@ class EncoderLayer(nn.Module):
         # the tokens from `mlen + qlen - self.ext_len - self.mem_len`
         # to `mlen + qlen - self.ext_len`.
         with torch.no_grad():
-            end_idx = mlen + max(0, qlen - 0 - self.ext_len)
+            end_idx = mems.size(0) + max(0, qlen - 0 - self.ext_len)
             beg_idx = max(0, end_idx - self.mem_len)
             cat = torch.cat([mems, hids], dim=0)
             new_mems = cat[beg_idx:end_idx].detach()
@@ -87,22 +93,47 @@ class EncoderLayer(nn.Module):
     def forward(self, x, masks):
         """Compute encoded features
 
+        :param masks:
         :param torch.Tensor x: encoded source features (batch, max_time_in, size)
         :param torch.Tensor mask: mask for x (batch, 1, max_time_in),1 for padding,0 for data
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
+        if self.mems is None:
+            self.init_mems()
+        if self.rel_pos:
+            hidden,_ = self.rel_forward(x,masks)
+        else:
+            hidden,_ = self.abs_forward(x,masks)
+        tgt_len = self.tgt_len
+        if self.future_len !=0:
+            x = hidden[:,-(tgt_len+self.future_len):]
+        else:
+            x = hidden[:,-tgt_len:]
+        return x, masks
+
+    def rel_forward(self, x, masks):
         if masks is not None:
             in_mask = ~masks.squeeze(1)
         else:
             in_mask = None
-        if self.mems is None:
-            self.init_mems()
-        if self.tgt_len is None:
-            tgt_len = x.size(1)
-        else:
-            tgt_len = self.tgt_len
         x = x.transpose(0, 1)
-        hidden, self.mems = self._forward(x, mask=in_mask, mems=self.mems)
-        pred_hid = hidden[-tgt_len:]
-        x = pred_hid.transpose(0, 1)
-        return x, masks
+        hidden = self._forward(x, mask=in_mask, mems=self.mems)
+        qlen = x.size(0)
+        self.mems = self._update_mems(x, self.mems, qlen, self.mem_len)
+        x = hidden.transpose(0, 1)
+
+        return x,masks
+
+    def abs_forward(self, x, masks):
+        qlen = x.size(1)
+        if self.mems is not None and self.mems.dim() > 1:
+            x = torch.cat([self.mems.transpose(0, 1), x], dim=1)
+            if self.mem_len > 0:
+                m_mask = torch.ones(masks.size(0), 1, self.mems.size(0)).byte().to(masks.device)
+                masks = torch.cat([m_mask, masks], dim=-1)
+            x, masks = self.layer(x, masks)
+            self.mems = self._update_mems(x.transpose(0,1), self.mems, qlen, self.mem_len)
+        else:
+            x, masks = self.layer(x, masks)
+            self.mems = self._update_mems(x.transpose(0, 1), self.mems, qlen, self.mem_len)
+        return x,masks
