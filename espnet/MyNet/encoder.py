@@ -44,9 +44,9 @@ class Encoder(torch.nn.Module):
         super(Encoder, self).__init__()
         self.idim = idim
         self.center_len = center_len
-        self.use_mem = use_mem
+        self.use_mem = use_mem !=0
         self.left_len = left_len
-        if use_mem != 0:
+        if self.use_mem != 0:
             self.mem_len = left_len
         else:
             self.mem_len = 0
@@ -171,7 +171,7 @@ class Encoder(torch.nn.Module):
                 mask_list.append(maskss)
             xs = torch.cat(xs_list, dim=1)
             masks = torch.cat(mask_list, dim=2)
-            if self.use_mem!=0:
+            if self.use_mem:
                 for layer in self.encoders._modules.values():
                     if isinstance(layer, EncoderLayer):
                         layer.mems = None
